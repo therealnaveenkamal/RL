@@ -27,6 +27,13 @@ import ray
 import requests
 import torch
 import wandb
+
+try:
+    import mlflow
+
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
 from matplotlib import pyplot as plt
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
@@ -52,6 +59,13 @@ class TensorboardConfig(TypedDict):
     log_dir: str
 
 
+class MLflowConfig(TypedDict):
+    experiment_name: str
+    run_name: Optional[str]
+    tracking_uri: Optional[str]
+    artifact_location: Optional[str]
+
+
 class GPUMonitoringConfig(TypedDict):
     collection_interval: int | float
     flush_interval: int | float
@@ -61,8 +75,10 @@ class LoggerConfig(TypedDict):
     log_dir: str
     wandb_enabled: bool
     tensorboard_enabled: bool
+    mlflow_enabled: bool
     wandb: WandbConfig
     tensorboard: TensorboardConfig
+    mlflow: MLflowConfig
     monitor_gpus: bool
     gpu_monitoring: GPUMonitoringConfig
 
@@ -198,8 +214,9 @@ class WandbLogger(LoggerInterface):
         Args:
             figure: Matplotlib figure to log
             step: Global step value
+            name: Name of the plot
         """
-        self.run.log({name: figure}, step=step)
+        self.run.log({name: wandb.Image(figure)}, step=step)
 
 
 class GpuMetricSnapshot(TypedDict):
@@ -499,6 +516,96 @@ class RayGpuMonitorLogger:
             self.metrics_buffer = []
 
 
+class MLflowLogger(LoggerInterface):
+    """MLflow logger backend."""
+
+    def __init__(self, cfg: MLflowConfig, log_dir: Optional[str] = None):
+        """Initialize MLflow logger.
+
+        Args:
+            cfg: MLflow configuration
+            log_dir: Optional log directory (not used by MLflow)
+        """
+        if not MLFLOW_AVAILABLE:
+            raise ImportError(
+                "MLflow is not installed. Install it with: uv pip install mlflow"
+            )
+
+        # Set tracking URI if provided
+        if cfg.get("tracking_uri"):
+            mlflow.set_tracking_uri(cfg["tracking_uri"])
+
+        # Set experiment
+        mlflow.set_experiment(cfg["experiment_name"])
+
+        # Start run
+        run_kwargs = {}
+        if cfg.get("run_name"):
+            run_kwargs["run_name"] = cfg["run_name"]
+        if cfg.get("artifact_location"):
+            run_kwargs["artifact_location"] = cfg["artifact_location"]
+
+        self.run = mlflow.start_run(**run_kwargs)
+        print(
+            f"Initialized MLflowLogger for experiment {cfg.get('experiment_name')}, "
+            f"run {cfg.get('run_name', 'unnamed')}"
+        )
+
+    def log_metrics(
+        self,
+        metrics: dict[str, Any],
+        step: int,
+        prefix: Optional[str] = "",
+        step_metric: Optional[str] = None,
+    ) -> None:
+        """Log metrics to MLflow.
+
+        Args:
+            metrics: Dict of metrics to log
+            step: Global step value
+            prefix: Optional prefix for metric names
+            step_metric: Optional step metric name (ignored in MLflow)
+        """
+        for name, value in metrics.items():
+            if prefix:
+                name = f"{prefix}/{name}"
+            mlflow.log_metric(name, value, step=step)
+
+    def log_hyperparams(self, params: Mapping[str, Any]) -> None:
+        """Log hyperparameters to MLflow.
+
+        Args:
+            params: Dictionary of hyperparameters to log
+        """
+        # MLflow does not support nested dicts
+        mlflow.log_params(flatten_dict(params))
+
+    def log_plot(self, figure: plt.Figure, step: int, name: str) -> None:
+        """Log a plot to MLflow.
+
+        Args:
+            figure: Matplotlib figure to log
+            step: Global step value
+            name: Name of the plot
+        """
+        # Save figure to a temporary file and log as artifact
+        # Can be useful for debugging
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            figure.savefig(tmp_file.name, format="png", bbox_inches="tight")
+            mlflow.log_artifact(tmp_file.name, f"plots/{name}")
+            os.unlink(tmp_file.name)
+
+    def __del__(self) -> None:
+        """Clean up resources when the logger is destroyed."""
+        try:
+            mlflow.end_run()
+        except Exception:
+            # Ignore errors during cleanup
+            pass
+
+
 class Logger(LoggerInterface):
     """Main logger class that delegates to multiple backend loggers."""
 
@@ -509,8 +616,10 @@ class Logger(LoggerInterface):
             cfg: Config dict with the following keys:
                 - wandb_enabled
                 - tensorboard_enabled
+                - mlflow_enabled
                 - wandb
                 - tensorboard
+                - mlflow
                 - monitor_gpus
                 - gpu_collection_interval
                 - gpu_flush_interval
@@ -535,19 +644,46 @@ class Logger(LoggerInterface):
             )
             self.loggers.append(tensorboard_logger)
 
+        if cfg.get("mlflow_enabled", False):
+            mlflow_log_dir = os.path.join(self.base_log_dir, "mlflow")
+            os.makedirs(mlflow_log_dir, exist_ok=True)
+            try:
+                # Get MLflow config with defaults
+                mlflow_cfg = cfg.get(
+                    "mlflow",
+                    {
+                        "experiment_name": "nemo-rl-experiment",
+                        "run_name": None,
+                        "tracking_uri": None,
+                        "artifact_location": None,
+                    },
+                )
+                mlflow_logger = MLflowLogger(mlflow_cfg, log_dir=mlflow_log_dir)
+                self.loggers.append(mlflow_logger)
+            except ImportError as e:
+                print(f"Warning: MLflow logging disabled - {e}")
+                print(
+                    "To enable MLflow logging, install it with: pip install mlflow or uv add mlflow"
+                )
+
         # Initialize GPU monitoring if requested
         self.gpu_monitor = None
-        if cfg["monitor_gpus"]:
+        if cfg.get("monitor_gpus", False):
             metric_prefix = "ray"
             step_metric = f"{metric_prefix}/ray_step"
-            if cfg["wandb_enabled"] and self.wandb_logger:
+            if cfg.get("wandb_enabled", False) and self.wandb_logger:
                 self.wandb_logger.define_metric(
                     f"{metric_prefix}/*", step_metric=step_metric
                 )
 
+            # Get GPU monitoring config with defaults
+            gpu_monitoring_cfg = cfg.get(
+                "gpu_monitoring", {"collection_interval": 10, "flush_interval": 10}
+            )
+
             self.gpu_monitor = RayGpuMonitorLogger(
-                collection_interval=cfg["gpu_monitoring"]["collection_interval"],
-                flush_interval=cfg["gpu_monitoring"]["flush_interval"],
+                collection_interval=gpu_monitoring_cfg["collection_interval"],
+                flush_interval=gpu_monitoring_cfg["flush_interval"],
                 metric_prefix=metric_prefix,
                 step_metric=step_metric,
                 parent_logger=self,
