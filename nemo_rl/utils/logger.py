@@ -21,19 +21,14 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping, Optional, TypedDict
+from typing import Any, Callable, Mapping, NotRequired, TypedDict
 
 import ray
 import requests
 import torch
 import wandb
+import mlflow
 
-try:
-    import mlflow
-
-    MLFLOW_AVAILABLE = True
-except ImportError:
-    MLFLOW_AVAILABLE = False
 from matplotlib import pyplot as plt
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
@@ -61,9 +56,8 @@ class TensorboardConfig(TypedDict):
 
 class MLflowConfig(TypedDict):
     experiment_name: str
-    run_name: Optional[str]
-    tracking_uri: Optional[str]
-    artifact_location: Optional[str]
+    run_name: str
+    tracking_uri: NotRequired[str]
 
 
 class GPUMonitoringConfig(TypedDict):
@@ -214,9 +208,8 @@ class WandbLogger(LoggerInterface):
         Args:
             figure: Matplotlib figure to log
             step: Global step value
-            name: Name of the plot
         """
-        self.run.log({name: wandb.Image(figure)}, step=step)
+        self.run.log({name: figure}, step=step)
 
 
 class GpuMetricSnapshot(TypedDict):
@@ -524,12 +517,8 @@ class MLflowLogger(LoggerInterface):
 
         Args:
             cfg: MLflow configuration
-            log_dir: Optional log directory (not used by MLflow)
+            log_dir: Optional log directory (used as artifact_location for MLflow)
         """
-        if not MLFLOW_AVAILABLE:
-            raise ImportError(
-                "MLflow is not installed. Install it with: uv pip install mlflow"
-            )
 
         # Set tracking URI if provided
         if cfg.get("tracking_uri"):
@@ -540,15 +529,15 @@ class MLflowLogger(LoggerInterface):
 
         # Start run
         run_kwargs = {}
-        if cfg.get("run_name"):
-            run_kwargs["run_name"] = cfg["run_name"]
-        if cfg.get("artifact_location"):
-            run_kwargs["artifact_location"] = cfg["artifact_location"]
+        run_kwargs["run_name"] = cfg["run_name"]
+        # Use log_dir as artifact_location for consistency
+        if log_dir:
+            run_kwargs["artifact_location"] = log_dir
 
         self.run = mlflow.start_run(**run_kwargs)
         print(
-            f"Initialized MLflowLogger for experiment {cfg.get('experiment_name')}, "
-            f"run {cfg.get('run_name', 'unnamed')}"
+            f"Initialized MLflowLogger for experiment {cfg['experiment_name']}, "
+            f"run {cfg['run_name']}"
         )
 
     def log_metrics(
@@ -644,34 +633,19 @@ class Logger(LoggerInterface):
             )
             self.loggers.append(tensorboard_logger)
 
-        if cfg.get("mlflow_enabled", False):
+        if cfg["mlflow_enabled"]:
             mlflow_log_dir = os.path.join(self.base_log_dir, "mlflow")
             os.makedirs(mlflow_log_dir, exist_ok=True)
-            try:
-                # Get MLflow config with defaults
-                mlflow_cfg = cfg.get(
-                    "mlflow",
-                    {
-                        "experiment_name": "nemo-rl-experiment",
-                        "run_name": None,
-                        "tracking_uri": None,
-                        "artifact_location": None,
-                    },
-                )
-                mlflow_logger = MLflowLogger(mlflow_cfg, log_dir=mlflow_log_dir)
-                self.loggers.append(mlflow_logger)
-            except ImportError as e:
-                print(f"Warning: MLflow logging disabled - {e}")
-                print(
-                    "To enable MLflow logging, install it with: pip install mlflow or uv add mlflow"
-                )
+            mlflow_cfg = cfg["mlflow"]
+            mlflow_logger = MLflowLogger(mlflow_cfg, log_dir=mlflow_log_dir)
+            self.loggers.append(mlflow_logger)
 
         # Initialize GPU monitoring if requested
         self.gpu_monitor = None
-        if cfg.get("monitor_gpus", False):
+        if cfg["monitor_gpus"]:
             metric_prefix = "ray"
             step_metric = f"{metric_prefix}/ray_step"
-            if cfg.get("wandb_enabled", False) and self.wandb_logger:
+            if cfg["wandb_enabled"] and self.wandb_logger:
                 self.wandb_logger.define_metric(
                     f"{metric_prefix}/*", step_metric=step_metric
                 )
