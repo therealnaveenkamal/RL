@@ -20,8 +20,9 @@ import os
 import re
 import threading
 import time
+import tempfile
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping, NotRequired, TypedDict
+from typing import Any, Callable, Mapping, NotRequired, TypedDict, Optional
 
 import ray
 import requests
@@ -530,9 +531,6 @@ class MLflowLogger(LoggerInterface):
         # Start run
         run_kwargs = {}
         run_kwargs["run_name"] = cfg["run_name"]
-        # Use log_dir as artifact_location for consistency
-        if log_dir:
-            run_kwargs["artifact_location"] = log_dir
 
         self.run = mlflow.start_run(**run_kwargs)
         print(
@@ -577,14 +575,10 @@ class MLflowLogger(LoggerInterface):
             step: Global step value
             name: Name of the plot
         """
-        # Save figure to a temporary file and log as artifact
-        # Can be useful for debugging
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+  
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp_file:
             figure.savefig(tmp_file.name, format="png", bbox_inches="tight")
             mlflow.log_artifact(tmp_file.name, f"plots/{name}")
-            os.unlink(tmp_file.name)
 
     def __del__(self) -> None:
         """Clean up resources when the logger is destroyed."""
@@ -636,8 +630,7 @@ class Logger(LoggerInterface):
         if cfg["mlflow_enabled"]:
             mlflow_log_dir = os.path.join(self.base_log_dir, "mlflow")
             os.makedirs(mlflow_log_dir, exist_ok=True)
-            mlflow_cfg = cfg["mlflow"]
-            mlflow_logger = MLflowLogger(mlflow_cfg, log_dir=mlflow_log_dir)
+            mlflow_logger = MLflowLogger(cfg["mlflow"], log_dir=mlflow_log_dir)
             self.loggers.append(mlflow_logger)
 
         # Initialize GPU monitoring if requested
@@ -650,14 +643,9 @@ class Logger(LoggerInterface):
                     f"{metric_prefix}/*", step_metric=step_metric
                 )
 
-            # Get GPU monitoring config with defaults
-            gpu_monitoring_cfg = cfg.get(
-                "gpu_monitoring", {"collection_interval": 10, "flush_interval": 10}
-            )
-
             self.gpu_monitor = RayGpuMonitorLogger(
-                collection_interval=gpu_monitoring_cfg["collection_interval"],
-                flush_interval=gpu_monitoring_cfg["flush_interval"],
+                collection_interval=cfg["gpu_monitoring"]["collection_interval"],
+                flush_interval=cfg["gpu_monitoring"]["flush_interval"],
                 metric_prefix=metric_prefix,
                 step_metric=step_metric,
                 parent_logger=self,
