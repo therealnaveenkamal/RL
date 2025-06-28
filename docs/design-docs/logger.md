@@ -98,7 +98,6 @@ mlflow:
   tracking_uri: "http://localhost:5000" # Optional tracking server URI
 ```
 
-Note: The artifact location is automatically set to the MLflow log directory for consistency with other loggers.
 
 #### MLflow UI
 

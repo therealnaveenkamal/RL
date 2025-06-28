@@ -518,15 +518,23 @@ class MLflowLogger(LoggerInterface):
 
         Args:
             cfg: MLflow configuration
-            log_dir: Optional log directory (used as artifact_location for MLflow)
+            log_dir: Optional log directory
         """
 
-        # Set tracking URI if provided
-        if cfg.get("tracking_uri"):
+        if cfg["tracking_uri"]:
             mlflow.set_tracking_uri(cfg["tracking_uri"])
 
-        # Set experiment
-        mlflow.set_experiment(cfg["experiment_name"])
+        experiment = mlflow.get_experiment_by_name(cfg["experiment_name"])
+        if experiment is None:
+            if log_dir:
+                mlflow.create_experiment(
+                    name=cfg["experiment_name"],
+                    artifact_location=log_dir,
+                )
+            else:
+                mlflow.create_experiment(cfg["experiment_name"])
+        else:
+            mlflow.set_experiment(cfg["experiment_name"])
 
         # Start run
         run_kwargs = {}
