@@ -86,6 +86,11 @@ class LoggerInterface(ABC):
         """Log dictionary of hyperparameters."""
         pass
 
+    @abstractmethod
+    def log_plot(self, figure: plt.Figure, step: int, name: str) -> None:
+        """Log a plot to the logger backend."""
+        pass
+
 
 class TensorboardLogger(LoggerInterface):
     """Tensorboard logger backend."""
@@ -424,12 +429,13 @@ class RayGpuMonitorLogger:
                 unique_metric_addresses[metrics_address] = True
 
             # Process each node's metrics
-            collected_metrics = {}
+            collected_metrics: dict[str, Any] = {}
             for node_idx, metric_address in enumerate(unique_metric_addresses):
                 metrics = self._fetch_and_parse_metrics(
                     node_idx, metric_address, parser_fn
                 )
-                collected_metrics.update(metrics)
+                if isinstance(metrics, dict):
+                    collected_metrics.update(metrics)
 
             return collected_metrics
 
@@ -481,8 +487,8 @@ class RayGpuMonitorLogger:
             if self.parent_logger:
                 # Log each set of metrics with its original step
                 for entry in self.metrics_buffer:
-                    step = entry["step"]
-                    metrics = entry["metrics"]
+                    step: int = entry["step"]
+                    metrics: dict[str, Any] = entry["metrics"]
 
                     # Add the step metric directly to metrics for use as step_metric
                     metrics[self.step_metric] = step
@@ -583,7 +589,7 @@ class Logger(LoggerInterface):
             params: Dict of hyperparameters to log
         """
         for logger in self.loggers:
-            logger.log_hyperparams(params)
+            logger.log_hyperparams(dict(params))
 
     def log_batched_dict_as_jsonl(
         self, to_log: BatchedDataDict[Any] | dict[str, Any], filename: str
@@ -647,23 +653,25 @@ class Logger(LoggerInterface):
         )
 
         generation_logprob = generation_logprobs[
-            sample_idx, generation_start_idx:generation_end_idx
+            int(sample_idx), int(generation_start_idx) : int(generation_end_idx)
         ]
         prev_logprob = (
-            prev_logprobs[sample_idx, generation_start_idx:generation_end_idx]
-            * mask[sample_idx, generation_start_idx:generation_end_idx]
+            prev_logprobs[
+                int(sample_idx), int(generation_start_idx) : int(generation_end_idx)
+            ]
+            * mask[int(sample_idx), int(generation_start_idx) : int(generation_end_idx)]
         )
         diff_i = diff[sample_idx, generation_start_idx:generation_end_idx]
 
         # Find max absolute error token
-        max_abs_error_idx = torch.argmax(diff_i).item()
+        max_abs_error_idx = int(torch.argmax(diff_i).item())
         max_abs_error = diff_i[max_abs_error_idx].item()
 
         # Find max relative error token (ratio of probabilities)
         gen_prob = torch.exp(generation_logprob)
         prev_prob = torch.exp(prev_logprob)
         relative_error = torch.abs((gen_prob - prev_prob) / gen_prob)
-        max_rel_error_idx = torch.argmax(relative_error).item()
+        max_rel_error_idx = int(torch.argmax(relative_error).item())
         max_rel_error = relative_error[max_rel_error_idx].item()
 
         fig = plt.figure()
