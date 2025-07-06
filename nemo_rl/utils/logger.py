@@ -18,18 +18,17 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
-import tempfile
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Mapping, NotRequired, TypedDict, Optional
+from typing import Any, Callable, Mapping, NotRequired, Optional, TypedDict
 
+import mlflow
 import ray
 import requests
 import torch
 import wandb
-import mlflow
-
 from matplotlib import pyplot as plt
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
@@ -435,7 +434,7 @@ class RayGpuMonitorLogger:
                 unique_metric_addresses[metrics_address] = True
 
             # Process each node's metrics
-            collected_metrics = {}
+            collected_metrics: dict[str, Any] = {}
             for node_idx, metric_address in enumerate(unique_metric_addresses):
                 metrics = self._fetch_and_parse_metrics(
                     node_idx, metric_address, parser_fn
@@ -520,7 +519,6 @@ class MLflowLogger(LoggerInterface):
             cfg: MLflow configuration
             log_dir: Optional log directory
         """
-
         if cfg["tracking_uri"]:
             mlflow.set_tracking_uri(cfg["tracking_uri"])
 
@@ -537,7 +535,7 @@ class MLflowLogger(LoggerInterface):
             mlflow.set_experiment(cfg["experiment_name"])
 
         # Start run
-        run_kwargs = {}
+        run_kwargs: dict[str, str] = {}
         run_kwargs["run_name"] = cfg["run_name"]
 
         self.run = mlflow.start_run(**run_kwargs)
@@ -583,7 +581,6 @@ class MLflowLogger(LoggerInterface):
             step: Global step value
             name: Name of the plot
         """
-  
         with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as tmp_file:
             figure.savefig(tmp_file.name, format="png", bbox_inches="tight")
             mlflow.log_artifact(tmp_file.name, f"plots/{name}")
@@ -753,13 +750,15 @@ class Logger(LoggerInterface):
         )
 
         generation_logprob = generation_logprobs[
-            sample_idx, generation_start_idx:generation_end_idx
+            sample_idx, int(generation_start_idx) : int(generation_end_idx)
         ]
         prev_logprob = (
-            prev_logprobs[sample_idx, generation_start_idx:generation_end_idx]
-            * mask[sample_idx, generation_start_idx:generation_end_idx]
+            prev_logprobs[
+                sample_idx, int(generation_start_idx) : int(generation_end_idx)
+            ]
+            * mask[sample_idx, int(generation_start_idx) : int(generation_end_idx)]
         )
-        diff_i = diff[sample_idx, generation_start_idx:generation_end_idx]
+        diff_i = diff[sample_idx, int(generation_start_idx) : int(generation_end_idx)]
 
         # Find max absolute error token
         max_abs_error_idx = torch.argmax(diff_i).item()
@@ -773,7 +772,7 @@ class Logger(LoggerInterface):
         max_rel_error = relative_error[max_rel_error_idx].item()
 
         fig = plt.figure()
-        step_idx = torch.arange(generation_start_idx, generation_end_idx)
+        step_idx = torch.arange(int(generation_start_idx), int(generation_end_idx))
 
         plt.plot(step_idx, generation_logprob, label="logprob (inference engine)")
         plt.plot(step_idx, prev_logprob, label="logprob (reference policy)")
