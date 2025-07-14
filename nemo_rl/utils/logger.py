@@ -18,8 +18,8 @@ import json
 import logging
 import os
 import re
-import tempfile
 import subprocess
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
